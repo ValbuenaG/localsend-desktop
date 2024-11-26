@@ -239,6 +239,7 @@ func (a *App) StartServer(port int) error {
 	mux := http.NewServeMux()
 	
 	// Serve HTML interface at root
+	// this is just for testing purposes
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

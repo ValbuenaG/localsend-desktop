@@ -77,7 +77,7 @@ func register(client *http.Client) string {
 
     // Create register request
     request := RegisterRequest{
-        PIN:          "082814", // Update with current PIN
+        PIN:          "333298", // Update with current PIN
         SenderPubKey: x509.MarshalPKCS1PublicKey(&clientKey.PublicKey),
     }
     fmt.Printf("Created register request with PIN: %s\n", request.PIN)
