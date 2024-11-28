@@ -108,6 +108,11 @@ func (a *App) generatePIN() string {
     return pin
 }
 
+// Add this method to App struct
+func (a *App) GetCurrentPIN() string {
+    return a.activePIN
+}
+
 func (a *App) generateCertificate() (tls.Certificate, error) {
     privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
     if err != nil {

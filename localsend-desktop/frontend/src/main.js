@@ -1,5 +1,5 @@
 import './style.css';
-import { GetLocalIPs, StartServer } from '../wailsjs/go/main/App';
+import { GetLocalIPs, StartServer, GetCurrentPIN } from '../wailsjs/go/main/App';
 
 document.querySelector('#app').innerHTML = `
     <div class="container">
@@ -7,6 +7,7 @@ document.querySelector('#app').innerHTML = `
         <div class="card">
             <button id="start-server" type="button">Start Server</button>
             <div id="ip-list"></div>
+            <div id="pin-display"></div>
         </div>
     </div>
 `;
@@ -15,12 +16,21 @@ document.querySelector('#app').innerHTML = `
 async function displayLocalIPs() {
     try {
         const ips = await GetLocalIPs();
+        const pin = await GetCurrentPIN();
+
         const ipList = document.getElementById('ip-list');
+        const pinDisplay = document.getElementById('pin-display');
+
         ipList.innerHTML = `
             <h3>Local IP Addresses:</h3>
             <ul>
                 ${ips.map(ip => `<li>${ip}</li>`).join('')}
             </ul>
+        `;
+
+        pinDisplay.innerHTML = `
+            <h3>Connection PIN:</h3>
+            <div class="pin">${pin}</div>
         `;
     } catch (error) {
         console.error('Failed to get local IPs:', error);
