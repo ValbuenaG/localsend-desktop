@@ -1,0 +1,63 @@
+name: "osx-builds"
+on:
+  workflow_dispatch:
+    # This Action only starts when you go to Actions and manually run the workflow.
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        platform: [macos-latest]
+        go-version: [1.22.0]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: setup node
+        uses: actions/setup-node@v2
+        with:
+          node-version: 20.11.1
+      # You may need to manually build you frontend here, unless you have configured frontend build and install commands in wails.json.
+      - name: Get Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.8.0
+      - name: OSX - Enable dmg creation
+        if: matrix.platform == 'macos-latest'
+        run: |
+          npm install -g appdmg
+          echo ' { "title": "Rad Reader demo", "icon": "./defaultappicon.icns", "contents": [ { "x": 448, "y": 344, "type": "link", "path": "/Applications" }, { "x": 192, "y": 344, "type": "file", "path": "./build/bin/Rad Reader.app" } ] } ' > dmg-demo.json
+          echo ' { "title": "Rad Reader", "icon": "./defaultappicon.icns", "contents": [ { "x": 448, "y": 344, "type": "link", "path": "/Applications" }, { "x": 192, "y": 344, "type": "file", "path": "./build/bin/Rad Reader.app" } ] } ' > dmg-release.json
+      - name: OSX - Build demo
+        if: matrix.platform == 'macos-latest'
+        run: |
+          wails build --platform "darwin/universal" --upx --tags "demo" --ldflags="-s -w" -o "rad-reader-demo.app"
+          appdmg ./dmg-demo.json ./build/bin/rad-reader-demo.dmg
+          echo "Removing old .app"
+          rm -rf "Rad Reader.app"
+      - name: OSX - Build release
+        if: matrix.platform == 'macos-latest'
+        run: |
+          wails build --platform "darwin/universal" --upx --tags "release" --ldflags="-s -w" -o "rad-reader-release.app"
+          appdmg ./dmg-demo.json ./build/bin/rad-reader-release.dmg
+      - name: Win - Build demo
+        if: matrix.platform == 'windows-latest'
+        run: |
+          wails build --upx --tags "demo" -o "rad-reader-demo.exe"
+      - name: Win - Build release
+        if: matrix.platform == 'windows-latest'
+        run: |
+          wails build --upx --tags "release" -o "rad-reader-release.exe"
+      - name: upload artifacts macOS
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v2
+        with:
+          name: wails-binaries-macos
+          path: build/bin/*
+      - name: upload artifacts windows
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v2
+        with:
+          name: wails-binaries-windows
+          path: build/bin/*
