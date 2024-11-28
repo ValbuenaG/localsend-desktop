@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"time"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
     "encoding/json"
@@ -69,6 +68,7 @@ type FileTransfer struct {
     Filename      string
     Size          int64
     Status        string // "preparing", "uploading", "completed", "cancelled"
+	Token		 string
 }
 
 // App struct
@@ -404,7 +404,7 @@ func (a *App) StartServer(port int) error {
 	})
 
 	// Localsend Register Endpoint
-	mux.HandleFunc("/api/v1/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/localsend/v2/register", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost {
             w.WriteHeader(http.StatusMethodNotAllowed)
             return
@@ -495,106 +495,68 @@ func (a *App) StartServer(port int) error {
     })
 
 	// LocalSend prepare upload endpoint
-	mux.HandleFunc("/api/v1/prepare-upload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
+	mux.HandleFunc("/api/localsend/v2/prepare-upload", func(w http.ResponseWriter, r *http.Request) {
+		pin := r.URL.Query().Get("pin")
+		if pin != a.activePIN {
+			http.Error(w, "Invalid PIN", http.StatusUnauthorized)
 			return
 		}
-	
-		body, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read request", http.StatusBadRequest)
-			return
-		}
-	
-		var req PrepareUploadRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-	
-		// Check session
-		a.sessionMutex.RLock()
-		_, exists := a.sessions[req.SessionID]
-		a.sessionMutex.RUnlock()
-		if !exists {
-			http.Error(w, "Invalid session", http.StatusUnauthorized)
-			return
-		}
-	
-		// Generate transmission ID
+		
 		transmissionID := uuid.New().String()
-	
-		// Store transfer info
+		fileToken := uuid.New().String() // LocalSend uses additional token
+		
 		a.transfers[transmissionID] = &FileTransfer{
 			TransmissionID: transmissionID,
-			Filename:      req.Filename,
-			Size:         req.Size,
-			Status:       "preparing",
+			Token: fileToken,
+			Status: "preparing",
 		}
-	
-		resp := PrepareUploadResponse{
-			TransmissionID: transmissionID,
+		
+		resp := map[string]string{
+			"fileId": transmissionID,
+			"token": fileToken,
 		}
-	
-		respData, err := json.Marshal(resp)
-		if err != nil {
-			http.Error(w, "Server error", http.StatusInternalServerError)
-			return
-		}
-	
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(respData)
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	// Upload endpoint
-	mux.HandleFunc("/api/v1/upload", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/localsend/v2/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-	
-		// Get session and transmission IDs from headers
-		sessionID := r.Header.Get("X-Session-ID")
-		transmissionID := r.Header.Get("X-Transmission-ID")
-	
-		// Add logging to debug
-		fmt.Printf("Received upload request - SessionID: %s, TransmissionID: %s\n", sessionID, transmissionID)
-	
-		// Validate session (without storing the unused session variable)
-		a.sessionMutex.RLock()
-		sessionExists := a.sessions[sessionID] != nil
-		a.sessionMutex.RUnlock()
-		
-		if !sessionExists {
-			http.Error(w, "Invalid session", http.StatusUnauthorized)
-			return
-		}
-	
-		// Validate transmission
+	 
+		// Get params from URL query
+		sessionId := r.URL.Query().Get("sessionId") 
+		fileId := r.URL.Query().Get("fileId")
+		token := r.URL.Query().Get("token")
+	 
+		fmt.Printf("Upload request - SessionID: %s, FileID: %s, Token: %s\n", 
+			sessionId, fileId, token)
+	 
+		// Validate transfer exists and token matches
 		a.transferMutex.RLock()
-		transfer, transferExists := a.transfers[transmissionID]
-		a.transferMutex.RUnlock()
-		
-		if !transferExists {
-			http.Error(w, fmt.Sprintf("Invalid transmission ID: %s", transmissionID), http.StatusBadRequest)
+		transfer, exists := a.transfers[fileId]
+		if !exists || transfer.Token != token {
+			a.transferMutex.RUnlock()
+			http.Error(w, "Invalid transfer", http.StatusBadRequest)
 			return
 		}
-	
-		// Parse the multipart form
+		a.transferMutex.RUnlock()
+	 
+		// Parse multipart form
 		if err := r.ParseMultipartForm(10 << 20); err != nil {
 			http.Error(w, "Failed to parse form", http.StatusBadRequest)
 			return
 		}
-	
+	 
 		file, handler, err := r.FormFile("file")
 		if err != nil {
 			http.Error(w, "Failed to get file", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
-	
-		// Create file
+	 
+		// Save file
 		filePath := filepath.Join(a.uploadDir, handler.Filename)
 		dst, err := os.Create(filePath)
 		if err != nil {
@@ -602,20 +564,19 @@ func (a *App) StartServer(port int) error {
 			return
 		}
 		defer dst.Close()
-	
-		// Save file
+	 
 		if _, err := io.Copy(dst, file); err != nil {
 			http.Error(w, "Failed to save file", http.StatusInternalServerError)
 			return
 		}
-	
-		// Update transfer status
+	 
+		// Update status
 		a.transferMutex.Lock()
 		transfer.Status = "completed"
 		a.transferMutex.Unlock()
-	
+	 
 		w.WriteHeader(http.StatusOK)
-	})
+	 })
 
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

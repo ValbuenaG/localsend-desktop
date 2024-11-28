@@ -44,26 +44,27 @@ type EncryptedPayload struct {
     Nonce        []byte `json:"nonce"`
 }
 
-func main() {
-    // Setup HTTPS client
+type FileTransferRequest struct {
+    FileId string `json:"fileId"`
+    Token  string `json:"token"` 
+ }
+
+ func main() {
     tr := &http.Transport{
         TLSClientConfig: &tls.Config{
             InsecureSkipVerify: true,
         },
     }
     client := &http.Client{Transport: tr}
-
-    // 1. Register and get session ID
-    sessionID := register(client)
-    fmt.Printf("Got session ID: %s\n", sessionID)
-
-    // 2. Upload a test file
-    err := uploadFile(sessionID, "test.txt", client)
+ 
+    pin := "619005"
+    register(client)
+    
+    err := uploadFile("test.txt", pin, client)
     if err != nil {
         panic(fmt.Sprintf("Failed to upload file: %v", err))
     }
-    fmt.Println("File upload completed successfully")
-}
+ }
 
 func register(client *http.Client) string {
     fmt.Println("Starting registration process...")
@@ -77,7 +78,7 @@ func register(client *http.Client) string {
 
     // Create register request
     request := RegisterRequest{
-        PIN:          "333298", // Update with current PIN
+        PIN:          "619005", // Update with current PIN
         SenderPubKey: x509.MarshalPKCS1PublicKey(&clientKey.PublicKey),
     }
     fmt.Printf("Created register request with PIN: %s\n", request.PIN)
@@ -146,7 +147,7 @@ func register(client *http.Client) string {
     fmt.Println("Sending registration request to server...")
     // Send request
     resp, err := client.Post(
-        "https://192.168.0.219:8080/api/v1/register",
+        "https://192.168.0.219:8080/api/localsend/v2/register",
         "application/octet-stream",
         bytes.NewBuffer(finalData),
     )
@@ -205,35 +206,19 @@ func register(client *http.Client) string {
     return response.SessionID
 }
 
-func uploadFile(sessionID string, filename string, client *http.Client) error {
-	fmt.Printf("Using session ID for upload: %s\n", sessionID)
-    // Get file info
-    fileInfo, err := os.Stat(filename)
-    if err != nil {
-        return fmt.Errorf("failed to get file info: %v", err)
-    }
-
-    // 1. Prepare upload
-    prepareReq := PrepareUploadRequest{
-        SessionID: sessionID,
-        Filename: filename,
-        Size:     fileInfo.Size(),
-    }
-
-    prepareData, _ := json.Marshal(prepareReq)
-    resp, err := client.Post(
-        "https://192.168.0.219:8080/api/v1/prepare-upload",
-        "application/json",
-        bytes.NewBuffer(prepareData),
-    )
+func uploadFile(filename string, pin string, client *http.Client) error {
+    // 1. Prepare upload with PIN
+    prepareURL := fmt.Sprintf("https://192.168.0.219:8080/api/localsend/v2/prepare-upload?pin=%s", pin)
+    resp, err := client.Post(prepareURL, "application/json", nil)
     if err != nil {
         return err
     }
     defer resp.Body.Close()
 
-    var prepareResp PrepareUploadResponse
-    json.NewDecoder(resp.Body).Decode(&prepareResp)
-    transmissionID := prepareResp.TransmissionID
+    var prepareResp FileTransferRequest
+    if err := json.NewDecoder(resp.Body).Decode(&prepareResp); err != nil {
+        return err
+    }
 
     // 2. Upload file
     file, err := os.Open(filename)
@@ -248,21 +233,22 @@ func uploadFile(sessionID string, filename string, client *http.Client) error {
     if err != nil {
         return err
     }
-    
-    _, err = io.Copy(part, file)
-    if err != nil {
-        return err
-    }
+    io.Copy(part, file)
     writer.Close()
 
-    req, err := http.NewRequest("POST", "https://192.168.0.219:8080/api/v1/upload", body)
+    // Create upload URL with query parameters
+    uploadURL := fmt.Sprintf(
+        "https://192.168.0.219:8080/api/localsend/v2/upload?pin=%s&fileId=%s&token=%s",
+        pin,
+        prepareResp.FileId,
+        prepareResp.Token,
+    )
+
+    req, err := http.NewRequest("POST", uploadURL, body)
     if err != nil {
         return err
     }
-    
     req.Header.Set("Content-Type", writer.FormDataContentType())
-    req.Header.Set("X-Session-ID", sessionID)
-    req.Header.Set("X-Transmission-ID", transmissionID)
 
     resp, err = client.Do(req)
     if err != nil {
