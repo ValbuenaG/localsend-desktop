@@ -3,21 +3,14 @@ package main
 import (
     "context"
     "crypto/rand"
-    "crypto/tls"
-    "crypto/x509"
-    "crypto/x509/pkix"
-	"crypto/rsa"
-    "encoding/pem"
+    "encoding/json"
     "fmt"
     "log"
-    "math/big"
     "net"
     "net/http"
-    "time"
-    "io"
     "os"
     "path/filepath"
-    "encoding/json"
+    "io"
 
     "github.com/google/uuid"
     "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -29,12 +22,28 @@ type FileTransfer struct {
     Status        string
 }
 
+type RegisterRequest struct {
+    Alias       string `json:"alias"`
+    Version     string `json:"version"`
+    DeviceModel string `json:"deviceModel"`
+    DeviceType  string `json:"deviceType"`
+    Fingerprint string `json:"fingerprint"`
+    Port        int    `json:"port"`
+    Protocol    string `json:"protocol"`
+    Download    bool   `json:"download"`
+}
+
+type RegisterResponse struct {
+    SessionID string `json:"sessionId"`
+}
+
 type App struct {
     ctx        context.Context
     server     *http.Server
     activePIN  string
     transfers  map[string]*FileTransfer
     uploadDir  string
+    devices    map[string]*RegisterRequest // Track registered devices by sessionId
 }
 
 func NewApp() *App {
@@ -45,6 +54,7 @@ func NewApp() *App {
     app := &App{
         uploadDir:  uploadDir,
         transfers:  make(map[string]*FileTransfer),
+        devices:    make(map[string]*RegisterRequest),
     }
     app.generatePIN()
     return app
@@ -108,67 +118,11 @@ func (a *App) generatePIN() string {
     return pin
 }
 
-// Add this method to App struct
 func (a *App) GetCurrentPIN() string {
     return a.activePIN
 }
 
-func (a *App) generateCertificate() (tls.Certificate, error) {
-    privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-    if err != nil {
-        return tls.Certificate{}, fmt.Errorf("failed to generate private key: %v", err)
-    }
-
-    template := x509.Certificate{
-        SerialNumber: big.NewInt(1),
-        Subject: pkix.Name{
-            Organization: []string{"LocalSend Desktop"},
-        },
-        NotBefore: time.Now(),
-        NotAfter:  time.Now().Add(24 * time.Hour),
-        KeyUsage:  x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-        ExtKeyUsage: []x509.ExtKeyUsage{
-            x509.ExtKeyUsageServerAuth,
-        },
-        BasicConstraintsValid: true,
-    }
-
-    ips := a.GetLocalIPs()
-    for _, ip := range ips {
-        if parsedIP := net.ParseIP(ip); parsedIP != nil {
-            template.IPAddresses = append(template.IPAddresses, parsedIP)
-        }
-    }
-    template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
-
-    derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
-    if err != nil {
-        return tls.Certificate{}, fmt.Errorf("failed to create certificate: %v", err)
-    }
-
-    certPEM := pem.EncodeToMemory(&pem.Block{
-        Type:  "CERTIFICATE",
-        Bytes: derBytes,
-    })
-    privKeyPEM := pem.EncodeToMemory(&pem.Block{
-        Type:  "RSA PRIVATE KEY",
-        Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-    })
-
-    tlsCert, err := tls.X509KeyPair(certPEM, privKeyPEM)
-    if err != nil {
-        return tls.Certificate{}, fmt.Errorf("failed to create TLS certificate: %v", err)
-    }
-
-    return tlsCert, nil
-}
-
 func (a *App) StartServer(port int) error {
-    cert, err := a.generateCertificate()
-    if err != nil {
-        return fmt.Errorf("failed to generate certificate: %v", err)
-    }
-
     mux := http.NewServeMux()
     
     // Root endpoint for web interface
@@ -206,10 +160,26 @@ func (a *App) StartServer(port int) error {
             return
         }
 
+        var regRequest RegisterRequest
+        if err := json.NewDecoder(r.Body).Decode(&regRequest); err != nil {
+            http.Error(w, "Invalid request body", http.StatusBadRequest)
+            return
+        }
+
+        // Log registration info
+        runtime.LogInfo(a.ctx, fmt.Sprintf("Device registration: %s (%s %s)", 
+            regRequest.Alias, regRequest.DeviceModel, regRequest.DeviceType))
+
         sessionID := uuid.New().String()
-        json.NewEncoder(w).Encode(map[string]string{
-            "sessionId": sessionID,
-        })
+        // Store device info
+        a.devices[sessionID] = &regRequest
+
+        response := RegisterResponse{
+            SessionID: sessionID,
+        }
+        
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(response)
     })
 
     // LocalSend prepare upload endpoint
@@ -267,19 +237,16 @@ func (a *App) StartServer(port int) error {
     a.server = &http.Server{
         Addr:    fmt.Sprintf(":%d", port),
         Handler: mux,
-        TLSConfig: &tls.Config{
-            Certificates: []tls.Certificate{cert},
-        },
     }
 
     go func() {
-        if err := a.server.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
-            log.Printf("HTTPS server error: %v\n", err)
-            runtime.LogError(a.ctx, fmt.Sprintf("HTTPS server error: %v", err))
+        if err := a.server.ListenAndServe(); err != http.ErrServerClosed {
+            log.Printf("HTTP server error: %v\n", err)
+            runtime.LogError(a.ctx, fmt.Sprintf("HTTP server error: %v", err))
         }
     }()
 
-    runtime.LogInfo(a.ctx, fmt.Sprintf("LocalSend HTTPS server started on port %d", port))
+    runtime.LogInfo(a.ctx, fmt.Sprintf("LocalSend HTTP server started on port %d", port))
     return nil
 }
 

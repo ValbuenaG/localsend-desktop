@@ -40,8 +40,8 @@ async function displayLocalIPs() {
 // Start server on button click
 document.getElementById('start-server').addEventListener('click', async () => {
     try {
-        await StartServer(8080);
-        document.getElementById('start-server').textContent = 'Server Running on Port 8080';
+        await StartServer(53317);
+        document.getElementById('start-server').textContent = 'Server Running on Port 53317';
         document.getElementById('start-server').disabled = true;
     } catch (error) {
         console.error('Failed to start server:', error);

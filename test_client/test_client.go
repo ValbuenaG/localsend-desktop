@@ -4,12 +4,26 @@ import (
     "fmt"
     "bytes"
     "net/http"
-    "crypto/tls"
     "io"
     "mime/multipart"
     "os"
     "encoding/json"
 )
+
+type RegisterRequest struct {
+    Alias       string `json:"alias"`
+    Version     string `json:"version"`
+    DeviceModel string `json:"deviceModel"`
+    DeviceType  string `json:"deviceType"`
+    Fingerprint string `json:"fingerprint"`
+    Port        int    `json:"port"`
+    Protocol    string `json:"protocol"`
+    Download    bool   `json:"download"`
+}
+
+type RegisterResponse struct {
+    SessionID string `json:"sessionId"`
+}
 
 type FileTransferRequest struct {
     FileId string `json:"fileId"`
@@ -17,14 +31,9 @@ type FileTransferRequest struct {
 }
 
 func main() {
-    tr := &http.Transport{
-        TLSClientConfig: &tls.Config{
-            InsecureSkipVerify: true,
-        },
-    }
-    client := &http.Client{Transport: tr}
+    client := &http.Client{}
 
-    pin := "957732"
+    pin := "847795"
     sessionId := register(client)
     fmt.Printf("Got session ID: %s\n", sessionId)
     
@@ -38,11 +47,28 @@ func main() {
 func register(client *http.Client) string {
     fmt.Println("Starting registration process...")
     
+    // Create registration request payload
+    regRequest := RegisterRequest{
+        Alias:       "TestClient",
+        Version:     "2.0",
+        DeviceModel: "GoClient",
+        DeviceType:  "desktop",
+        Fingerprint: "test-fingerprint",
+        Port:        53317,
+        Protocol:    "http",
+        Download:    true,
+    }
+    
+    payload, err := json.Marshal(regRequest)
+    if err != nil {
+        panic(fmt.Sprintf("Failed to marshal registration request: %v", err))
+    }
+
     // Send registration request
     resp, err := client.Post(
-        "https://192.168.0.219:8080/api/localsend/v2/register",
+        "http://192.168.0.191:53317/api/localsend/v2/register",
         "application/json",
-        nil,
+        bytes.NewBuffer(payload),
     )
     if err != nil {
         panic(fmt.Sprintf("Failed to send request: %v", err))
@@ -50,19 +76,18 @@ func register(client *http.Client) string {
     defer resp.Body.Close()
 
     // Parse response
-    var response map[string]string
+    var response RegisterResponse
     if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
         panic(fmt.Sprintf("Failed to parse response: %v", err))
     }
 
-    sessionId := response["sessionId"]
-    fmt.Printf("Successfully registered, got session ID: %s\n", sessionId)
-    return sessionId
+    fmt.Printf("Successfully registered, got session ID: %s\n", response.SessionID)
+    return response.SessionID
 }
 
 func uploadFile(filename string, pin string, sessionId string, client *http.Client) error {
     // 1. Prepare upload with PIN
-    prepareURL := fmt.Sprintf("https://192.168.0.219:8080/api/localsend/v2/prepare-upload?pin=%s", pin)
+    prepareURL := fmt.Sprintf("http://192.168.0.191:53317/api/localsend/v2/prepare-upload?pin=%s", pin)
     resp, err := client.Post(prepareURL, "application/json", nil)
     if err != nil {
         return err
@@ -92,7 +117,7 @@ func uploadFile(filename string, pin string, sessionId string, client *http.Clie
 
     // Create upload URL with query parameters
     uploadURL := fmt.Sprintf(
-        "https://192.168.0.219:8080/api/localsend/v2/upload?sessionId=%s&fileId=%s&token=%s",
+        "http://192.168.0.191:53317/api/localsend/v2/upload?sessionId=%s&fileId=%s&token=%s",
         sessionId,
         prepareResp.FileId,
         prepareResp.Token,
