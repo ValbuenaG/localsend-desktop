@@ -187,18 +187,10 @@ func (a *App) StartServer(port int) error {
     // LocalSend prepare upload endpoint
     mux.HandleFunc("/api/localsend/v2/prepare-upload", func(w http.ResponseWriter, r *http.Request) {
         pin := r.URL.Query().Get("pin")
-        sessionId := r.URL.Query().Get("sessionId")
         
         // Validate PIN
         if pin != a.activePIN {
             http.Error(w, "Invalid PIN", http.StatusUnauthorized)
-            return
-        }
-        
-        // Validate sessionId
-        _, deviceRegistered := a.devices[sessionId]
-        if !deviceRegistered {
-            http.Error(w, "Device not registered", http.StatusUnauthorized)
             return
         }
         
