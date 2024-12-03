@@ -1,5 +1,5 @@
 import './style.css';
-import { GetLocalIPs, StartServer, GetCurrentPIN } from '../wailsjs/go/main/App';
+import { GetLocalIPs, StartServer, GetCurrentPIN, RegisterWithDevice, SendTestFile } from '../wailsjs/go/main/App';
 
 document.querySelector('#app').innerHTML = `
     <div class="container">
@@ -8,6 +8,16 @@ document.querySelector('#app').innerHTML = `
             <button id="start-server" type="button">Start Server</button>
             <div id="ip-list"></div>
             <div id="pin-display"></div>
+
+            <div class="connection-controls">
+                <h3>Connect to iOS Device</h3>
+                <input type="text" id="ios-ip" placeholder="iOS IP Address" />
+                <input type="text" id="ios-port" placeholder="iOS Port (e.g., 53318)" value="53318" />
+                <input type="text" id="ios-pin" placeholder="iOS PIN" />
+                <button id="register-button">Register</button>
+                <button id="send-file-button">Send Test File</button>
+                <div id="status-message"></div>
+            </div>
         </div>
     </div>
 `;
@@ -48,5 +58,36 @@ document.getElementById('start-server').addEventListener('click', async () => {
     }
 });
 
+// Add event listeners for the new buttons
+document.getElementById('register-button').addEventListener('click', async () => {
+    const ip = document.getElementById('ios-ip').value;
+    const port = parseInt(document.getElementById('ios-port').value);
+    const statusMessage = document.getElementById('status-message');
+
+    try {
+        await RegisterWithDevice(ip, port);
+        statusMessage.textContent = 'Successfully registered with iOS device';
+        statusMessage.style.color = 'green';
+    } catch (error) {
+        statusMessage.textContent = `Failed to register: ${error}`;
+        statusMessage.style.color = 'red';
+    }
+});
+
+document.getElementById('send-file-button').addEventListener('click', async () => {
+    const ip = document.getElementById('ios-ip').value;
+    const port = parseInt(document.getElementById('ios-port').value);
+    const pin = document.getElementById('ios-pin').value;
+    const statusMessage = document.getElementById('status-message');
+
+    try {
+        await SendTestFile(ip, port, pin);
+        statusMessage.textContent = 'File sent successfully';
+        statusMessage.style.color = 'green';
+    } catch (error) {
+        statusMessage.textContent = `Failed to send file: ${error}`;
+        statusMessage.style.color = 'red';
+    }
+});
 // Display IPs when the page loads
 displayLocalIPs();

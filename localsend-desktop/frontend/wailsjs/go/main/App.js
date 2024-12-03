@@ -10,6 +10,14 @@ export function GetLocalIPs() {
   return window['go']['main']['App']['GetLocalIPs']();
 }
 
+export function RegisterWithDevice(arg1, arg2) {
+  return window['go']['main']['App']['RegisterWithDevice'](arg1, arg2);
+}
+
+export function SendTestFile(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SendTestFile'](arg1, arg2, arg3);
+}
+
 export function StartServer(arg1) {
   return window['go']['main']['App']['StartServer'](arg1);
 }

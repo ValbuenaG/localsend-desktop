@@ -33,7 +33,7 @@ type FileTransferRequest struct {
 func main() {
     client := &http.Client{}
 
-    pin := "847795"
+    pin := "536101"
     sessionId := register(client)
     fmt.Printf("Got session ID: %s\n", sessionId)
     

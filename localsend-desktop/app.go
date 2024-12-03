@@ -11,6 +11,8 @@ import (
     "os"
     "path/filepath"
     "io"
+    "bytes"
+    "mime/multipart"
 
     "github.com/google/uuid"
     "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -257,4 +259,104 @@ func (a *App) Shutdown(ctx context.Context) {
         }
         runtime.LogInfo(a.ctx, "Server stopped successfully")
     }
+}
+
+// client side methods
+
+func (a *App) RegisterWithDevice(ip string, port int) error {
+    client := &http.Client{}
+    regRequest := struct {
+        Alias       string `json:"alias"`
+        Version     string `json:"version"`
+        DeviceModel string `json:"deviceModel"`
+        DeviceType  string `json:"deviceType"`
+        Fingerprint string `json:"fingerprint"`
+        Port        int    `json:"port"`
+        Protocol    string `json:"protocol"`
+        Download    bool   `json:"download"`
+    }{
+        Alias:       "WailsDesktop",
+        Version:     "2.0",
+        DeviceModel: "Desktop",
+        DeviceType:  "desktop",
+        Fingerprint: "test-fingerprint",
+        Port:        port,
+        Protocol:    "http",
+        Download:    true,
+    }
+
+    payload, err := json.Marshal(regRequest)
+    if err != nil {
+        return fmt.Errorf("failed to marshal registration request: %v", err)
+    }
+
+    resp, err := client.Post(
+        fmt.Sprintf("http://%s:%d/api/localsend/v2/register", ip, port),
+        "application/json",
+        bytes.NewBuffer(payload),
+    )
+    if err != nil {
+        return fmt.Errorf("failed to send registration request: %v", err)
+    }
+    defer resp.Body.Close()
+
+    return nil
+}
+
+func (a *App) SendTestFile(ip string, port int, pin string) error {
+    client := &http.Client{}
+    
+    // Step 1: Prepare upload
+    prepareURL := fmt.Sprintf("http://%s:%d/api/localsend/v2/prepare-upload?pin=%s", ip, port, pin)
+    resp, err := client.Post(prepareURL, "application/json", nil)
+    if err != nil {
+        return fmt.Errorf("failed to prepare upload: %v", err)
+    }
+    
+    var prepareResp struct {
+        FileId string `json:"fileId"`
+        Token  string `json:"token"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&prepareResp); err != nil {
+        return fmt.Errorf("failed to decode prepare response: %v", err)
+    }
+    resp.Body.Close()
+
+    // Step 2: Upload file
+    body := &bytes.Buffer{}
+    writer := multipart.NewWriter(body)
+    part, err := writer.CreateFormFile("file", "test.txt")
+    if err != nil {
+        return fmt.Errorf("failed to create form file: %v", err)
+    }
+    
+    // Write test content
+    if _, err := part.Write([]byte("sending from wails app")); err != nil {
+        return fmt.Errorf("failed to write file content: %v", err)
+    }
+    writer.Close()
+
+    uploadURL := fmt.Sprintf(
+        "http://%s:%d/api/localsend/v2/upload?fileId=%s&token=%s",
+        ip, port, prepareResp.FileId, prepareResp.Token,
+    )
+
+    req, err := http.NewRequest("POST", uploadURL, body)
+    if err != nil {
+        return fmt.Errorf("failed to create upload request: %v", err)
+    }
+    req.Header.Set("Content-Type", writer.FormDataContentType())
+
+    resp, err = client.Do(req)
+    if err != nil {
+        return fmt.Errorf("failed to upload file: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        return fmt.Errorf("upload failed with status: %s", resp.Status)
+    }
+
+    runtime.LogInfo(a.ctx, "file uploaded succesfully")
+    return nil
 }
