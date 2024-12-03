@@ -221,6 +221,13 @@ func (a *App) StartServer(port int) error {
     mux.HandleFunc("/api/localsend/v2/upload", func(w http.ResponseWriter, r *http.Request) {
         fileId := r.URL.Query().Get("fileId")
         token := r.URL.Query().Get("token")
+        sessionId := r.URL.Query().Get("sessionId")
+        
+        // Validate sessionId first
+        if _, deviceRegistered := a.devices[sessionId]; !deviceRegistered {
+            http.Error(w, "Device not registered", http.StatusUnauthorized)
+            return
+        }
         
         transfer, exists := a.transfers[fileId]
         if !exists || transfer.Token != token {
