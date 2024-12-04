@@ -46,18 +46,45 @@ type App struct {
     transfers  map[string]*FileTransfer
     uploadDir  string
     devices    map[string]*RegisterRequest // Track registered devices by sessionId
+    currentSessionId string
+}
+
+func (a *App) getUploadsDirectory() string {
+    // Get user's home directory
+    homeDir, err := os.UserHomeDir()
+    if err != nil {
+        return filepath.Join(".", "uploads")  // Fallback to local directory
+    }
+    
+    // Create a directory in Documents
+    uploadsDir := filepath.Join(homeDir, "Documents", "LocalSendUploads")
+    os.MkdirAll(uploadsDir, 0755)
+    return uploadsDir
+}
+
+// Add notification methods
+func (a *App) ShowDeviceRegistered(deviceInfo string) {
+    runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+        Type:    runtime.InfoDialog,
+        Title:   "Device Registered",
+        Message: "New device registered: " + deviceInfo,
+    })
+}
+
+func (a *App) ShowFileReceived(fileName string) {
+    runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+        Type:    runtime.InfoDialog,
+        Title:   "File Received",
+        Message: "Received file: " + fileName + "\nSaved in: " + a.uploadDir,
+    })
 }
 
 func NewApp() *App {
-    // Create uploads directory
-    uploadDir := filepath.Join(".", "uploads")
-    os.MkdirAll(uploadDir, 0755)
-
     app := &App{
-        uploadDir:  uploadDir,
         transfers:  make(map[string]*FileTransfer),
         devices:    make(map[string]*RegisterRequest),
     }
+    app.uploadDir = app.getUploadsDirectory()
     app.generatePIN()
     return app
 }
@@ -126,34 +153,6 @@ func (a *App) GetCurrentPIN() string {
 
 func (a *App) StartServer(port int) error {
     mux := http.NewServeMux()
-    
-    // Root endpoint for web interface
-    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        if r.URL.Path != "/" {
-            http.NotFound(w, r)
-            return
-        }
-        w.Header().Set("Content-Type", "text/html")
-        fmt.Fprintf(w, `<!DOCTYPE html>
-        <html>
-        <head>
-            <title>LocalSend Test</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body { font-family: system-ui; max-width: 800px; margin: 0 auto; padding: 20px; }
-                .card { background: #f0f0f0; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            </style>
-        </head>
-        <body>
-            <h1>LocalSend Test Interface</h1>
-            <div class="card">
-                <h3>Connection Info</h3>
-                <p>Server IP: <strong>%s</strong></p>
-                <p>Current PIN: <strong>%s</strong></p>
-            </div>
-        </body>
-        </html>`, a.GetLocalIPs()[0], a.activePIN)
-    })
 
     // LocalSend Register Endpoint
     mux.HandleFunc("/api/localsend/v2/register", func(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +179,9 @@ func (a *App) StartServer(port int) error {
             SessionID: sessionID,
         }
         
+        deviceInfo := fmt.Sprintf("%s (%s)", regRequest.Alias, regRequest.DeviceModel)
+        go a.ShowDeviceRegistered(deviceInfo)
+
         w.Header().Set("Content-Type", "application/json")
         json.NewEncoder(w).Encode(response)
     })
@@ -242,6 +244,7 @@ func (a *App) StartServer(port int) error {
         defer dst.Close()
         
         io.Copy(dst, file)
+        go a.ShowFileReceived(handler.Filename)
         w.WriteHeader(http.StatusOK)
     })
 
@@ -298,7 +301,7 @@ func (a *App) RegisterWithDevice(ip string, port int) error {
     if err != nil {
         return fmt.Errorf("failed to marshal registration request: %v", err)
     }
-
+    runtime.LogInfo(a.ctx, fmt.Sprintf("Sending registration request to %s:%d", ip, port))
     resp, err := client.Post(
         fmt.Sprintf("http://%s:%d/api/localsend/v2/register", ip, port),
         "application/json",
@@ -309,14 +312,30 @@ func (a *App) RegisterWithDevice(ip string, port int) error {
     }
     defer resp.Body.Close()
 
+    // Parse and store sessionId
+    var registerResp struct {
+        SessionID string `json:"sessionId"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&registerResp); err != nil {
+        return fmt.Errorf("failed to decode register response: %v", err)
+    }
+
+    a.currentSessionId = registerResp.SessionID
+    runtime.LogInfo(a.ctx, fmt.Sprintf("Successfully registered with sessionId: %s", a.currentSessionId))
     return nil
 }
 
 func (a *App) SendTestFile(ip string, port int, pin string) error {
+    if a.currentSessionId == "" {
+        return fmt.Errorf("must register before sending files")
+    }
+
     client := &http.Client{}
     
     // Step 1: Prepare upload
     prepareURL := fmt.Sprintf("http://%s:%d/api/localsend/v2/prepare-upload?pin=%s", ip, port, pin)
+    runtime.LogInfo(a.ctx, fmt.Sprintf("Preparing upload with URL: %s", prepareURL))
+    
     resp, err := client.Post(prepareURL, "application/json", nil)
     if err != nil {
         return fmt.Errorf("failed to prepare upload: %v", err)
@@ -330,6 +349,9 @@ func (a *App) SendTestFile(ip string, port int, pin string) error {
         return fmt.Errorf("failed to decode prepare response: %v", err)
     }
     resp.Body.Close()
+
+    runtime.LogInfo(a.ctx, fmt.Sprintf("Got prepare response - FileId: %s, Token: %s", 
+        prepareResp.FileId, prepareResp.Token))
 
     // Step 2: Upload file
     body := &bytes.Buffer{}
@@ -346,9 +368,10 @@ func (a *App) SendTestFile(ip string, port int, pin string) error {
     writer.Close()
 
     uploadURL := fmt.Sprintf(
-        "http://%s:%d/api/localsend/v2/upload?fileId=%s&token=%s",
-        ip, port, prepareResp.FileId, prepareResp.Token,
+        "http://%s:%d/api/localsend/v2/upload?fileId=%s&token=%s&sessionId=%s",
+        ip, port, prepareResp.FileId, prepareResp.Token, a.currentSessionId,
     )
+    runtime.LogInfo(a.ctx, fmt.Sprintf("Uploading file with URL: %s", uploadURL))
 
     req, err := http.NewRequest("POST", uploadURL, body)
     if err != nil {
@@ -362,10 +385,12 @@ func (a *App) SendTestFile(ip string, port int, pin string) error {
     }
     defer resp.Body.Close()
 
+    // Read response body for error details
+    responseBody, _ := io.ReadAll(resp.Body)
     if resp.StatusCode != http.StatusOK {
-        return fmt.Errorf("upload failed with status: %s", resp.Status)
+        return fmt.Errorf("upload failed with status: %s, body: %s", resp.Status, string(responseBody))
     }
 
-    runtime.LogInfo(a.ctx, "file uploaded succesfully")
+    runtime.LogInfo(a.ctx, fmt.Sprintf("File uploaded successfully. Response: %s", string(responseBody)))
     return nil
 }

@@ -18,6 +18,14 @@ export function SendTestFile(arg1, arg2, arg3) {
   return window['go']['main']['App']['SendTestFile'](arg1, arg2, arg3);
 }
 
+export function ShowDeviceRegistered(arg1) {
+  return window['go']['main']['App']['ShowDeviceRegistered'](arg1);
+}
+
+export function ShowFileReceived(arg1) {
+  return window['go']['main']['App']['ShowFileReceived'](arg1);
+}
+
 export function StartServer(arg1) {
   return window['go']['main']['App']['StartServer'](arg1);
 }
