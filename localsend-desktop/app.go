@@ -22,6 +22,7 @@ type FileTransfer struct {
     TransmissionID string
     Token         string
     Status        string
+    SessionId     string
 }
 
 type RegisterRequest struct {
@@ -160,30 +161,26 @@ func (a *App) StartServer(port int) error {
             w.WriteHeader(http.StatusMethodNotAllowed)
             return
         }
-
+    
         var regRequest RegisterRequest
         if err := json.NewDecoder(r.Body).Decode(&regRequest); err != nil {
             http.Error(w, "Invalid request body", http.StatusBadRequest)
             return
         }
-
+    
         // Log registration info
         runtime.LogInfo(a.ctx, fmt.Sprintf("Device registration: %s (%s %s)", 
             regRequest.Alias, regRequest.DeviceModel, regRequest.DeviceType))
-
-        sessionID := uuid.New().String()
-        // Store device info
-        a.devices[sessionID] = &regRequest
-
-        response := RegisterResponse{
-            SessionID: sessionID,
-        }
+    
+        // Store device info with fingerprint as key instead of sessionId
+        a.devices[regRequest.Fingerprint] = &regRequest
         
         deviceInfo := fmt.Sprintf("%s (%s)", regRequest.Alias, regRequest.DeviceModel)
         go a.ShowDeviceRegistered(deviceInfo)
-
+    
         w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(response)
+        // Send empty response as per protocol
+        json.NewEncoder(w).Encode(struct{}{})
     })
 
     // LocalSend prepare upload endpoint
@@ -198,16 +195,20 @@ func (a *App) StartServer(port int) error {
         
         fileId := uuid.New().String()
         token := uuid.New().String()
+        sessionId := uuid.New().String()
         
         a.transfers[fileId] = &FileTransfer{
             TransmissionID: fileId,
             Token: token,
             Status: "preparing",
+            SessionId: sessionId,
         }
         
-        json.NewEncoder(w).Encode(map[string]string{
-            "fileId": fileId,
-            "token": token,
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "sessionId": sessionId,
+            "files": map[string]string{
+                fileId: token,
+            },
         })
     })
 
@@ -217,14 +218,8 @@ func (a *App) StartServer(port int) error {
         token := r.URL.Query().Get("token")
         sessionId := r.URL.Query().Get("sessionId")
         
-        // Validate sessionId first
-        if _, deviceRegistered := a.devices[sessionId]; !deviceRegistered {
-            http.Error(w, "Device not registered", http.StatusUnauthorized)
-            return
-        }
-        
         transfer, exists := a.transfers[fileId]
-        if !exists || transfer.Token != token {
+        if !exists || transfer.Token != token || transfer.SessionId != sessionId {
             http.Error(w, "Invalid transfer", http.StatusBadRequest)
             return
         }
@@ -312,24 +307,10 @@ func (a *App) RegisterWithDevice(ip string, port int) error {
     }
     defer resp.Body.Close()
 
-    // Parse and store sessionId
-    var registerResp struct {
-        SessionID string `json:"sessionId"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&registerResp); err != nil {
-        return fmt.Errorf("failed to decode register response: %v", err)
-    }
-
-    a.currentSessionId = registerResp.SessionID
-    runtime.LogInfo(a.ctx, fmt.Sprintf("Successfully registered with sessionId: %s", a.currentSessionId))
     return nil
 }
 
 func (a *App) SendTestFile(ip string, port int, pin string) error {
-    if a.currentSessionId == "" {
-        return fmt.Errorf("must register before sending files")
-    }
-
     client := &http.Client{}
     
     // Step 1: Prepare upload
@@ -342,16 +323,24 @@ func (a *App) SendTestFile(ip string, port int, pin string) error {
     }
     
     var prepareResp struct {
-        FileId string `json:"fileId"`
-        Token  string `json:"token"`
+        SessionId string            `json:"sessionId"`
+        Files    map[string]string  `json:"files"`  // map[fileId]token
     }
     if err := json.NewDecoder(resp.Body).Decode(&prepareResp); err != nil {
         return fmt.Errorf("failed to decode prepare response: %v", err)
     }
     resp.Body.Close()
 
-    runtime.LogInfo(a.ctx, fmt.Sprintf("Got prepare response - FileId: %s, Token: %s", 
-        prepareResp.FileId, prepareResp.Token))
+    // Get the first file ID and token from the map
+    var fileId, token string
+    for fid, tok := range prepareResp.Files {
+        fileId = fid
+        token = tok
+        break
+    }
+
+    runtime.LogInfo(a.ctx, fmt.Sprintf("Got prepare response - SessionId: %s, FileId: %s, Token: %s", 
+        prepareResp.SessionId, fileId, token))
 
     // Step 2: Upload file
     body := &bytes.Buffer{}
@@ -369,7 +358,7 @@ func (a *App) SendTestFile(ip string, port int, pin string) error {
 
     uploadURL := fmt.Sprintf(
         "http://%s:%d/api/localsend/v2/upload?fileId=%s&token=%s&sessionId=%s",
-        ip, port, prepareResp.FileId, prepareResp.Token, a.currentSessionId,
+        ip, port, fileId, token, prepareResp.SessionId,
     )
     runtime.LogInfo(a.ctx, fmt.Sprintf("Uploading file with URL: %s", uploadURL))
 
