@@ -19,6 +19,7 @@ import (
     "io"
     "bytes"
     "mime/multipart"
+    "strings"
     "time"
 
     "github.com/google/uuid"
@@ -30,6 +31,7 @@ type FileTransfer struct {
     Token         string
     Status        string
     SessionId     string
+    FileName      string
 }
 
 type RegisterRequest struct {
@@ -231,22 +233,42 @@ func (a *App) StartServer(port int) error {
             return
         }
         
-        fileId := uuid.New().String()
-        token := uuid.New().String()
-        sessionId := uuid.New().String()
+        var prepareRequest struct {
+            Info struct {
+                Alias string `json:"alias"`
+            } `json:"info"`
+            Files map[string]struct {
+                ID       string `json:"id"`
+                FileName string `json:"fileName"`
+            } `json:"files"`
+        }
         
-        a.transfers[fileId] = &FileTransfer{
-            TransmissionID: fileId,
-            Token: token,
-            Status: "preparing",
-            SessionId: sessionId,
+        if err := json.NewDecoder(r.Body).Decode(&prepareRequest); err != nil {
+            http.Error(w, "Invalid body", http.StatusBadRequest)
+            return
+        }
+    
+        sessionId := uuid.New().String()
+        fileTokens := make(map[string]string)
+        
+        // Generate a token for each file in the request
+        for fileId := range prepareRequest.Files {
+            token := uuid.New().String()
+            fileTokens[fileId] = token
+            
+            // Store the transfer info
+            a.transfers[fileId] = &FileTransfer{
+                TransmissionID: fileId,
+                Token:         token,
+                SessionId:     sessionId,
+                Status:        "preparing",
+                FileName:      prepareRequest.Files[fileId].FileName,
+            }
         }
         
         json.NewEncoder(w).Encode(map[string]interface{}{
             "sessionId": sessionId,
-            "files": map[string]string{
-                fileId: token,
-            },
+            "files":    fileTokens,
         })
     })
 
@@ -256,29 +278,82 @@ func (a *App) StartServer(port int) error {
         token := r.URL.Query().Get("token")
         sessionId := r.URL.Query().Get("sessionId")
         
+        // Log for debugging
+        runtime.LogInfo(a.ctx, fmt.Sprintf("Upload attempt - FileId: %s, Token: %s, SessionId: %s", fileId, token, sessionId))
+        
         transfer, exists := a.transfers[fileId]
         if !exists || transfer.Token != token || transfer.SessionId != sessionId {
+            runtime.LogInfo(a.ctx, "Transfer validation failed")
             http.Error(w, "Invalid transfer", http.StatusBadRequest)
             return
         }
-        
-        file, handler, err := r.FormFile("file")
-        if err != nil {
-            http.Error(w, "Failed to get file", http.StatusBadRequest)
-            return
+    
+        var file io.Reader
+        var filename string
+    
+        contentType := r.Header.Get("Content-Type")
+        if strings.HasPrefix(contentType, "multipart/form-data") {
+            // Handle multipart form data
+            f, handler, err := r.FormFile("file")
+            if err != nil {
+                runtime.LogError(a.ctx, fmt.Sprintf("Failed to get form file: %v", err))
+                http.Error(w, "Failed to get file", http.StatusBadRequest)
+                return
+            }
+            defer f.Close()
+            file = f
+            filename = handler.Filename
+        } else {
+            // Handle direct binary data
+            file = r.Body
+            filename = transfer.FileName
         }
-        defer file.Close()
-        
-        dst, err := os.Create(filepath.Join(a.uploadDir, handler.Filename))
+    
+        // Create destination file
+        dst, err := os.Create(filepath.Join(a.uploadDir, filename))
         if err != nil {
+            runtime.LogError(a.ctx, fmt.Sprintf("Failed to create file: %v", err))
             http.Error(w, "Failed to save file", http.StatusInternalServerError)
             return
         }
         defer dst.Close()
         
-        io.Copy(dst, file)
-        go a.ShowFileReceived(handler.Filename)
+        // Copy the file
+        _, err = io.Copy(dst, file)
+        if err != nil {
+            runtime.LogError(a.ctx, fmt.Sprintf("Failed to save file data: %v", err))
+            http.Error(w, "Failed to save file", http.StatusInternalServerError)
+            return
+        }
+    
+        go a.ShowFileReceived(filename)
         w.WriteHeader(http.StatusOK)
+    })
+
+    mux.HandleFunc("/api/localsend/v1/info", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+            w.WriteHeader(http.StatusMethodNotAllowed)
+            return
+        }
+    
+        info := struct {
+            Alias       string `json:"alias"`
+            Version     string `json:"version"`
+            DeviceModel string `json:"deviceModel"`
+            DeviceType  string `json:"deviceType"`
+            Fingerprint string `json:"fingerprint"`
+            Download    bool   `json:"download"`
+        }{
+            Alias:       "WailsDesktop",
+            Version:     "2.0",
+            DeviceModel: "Desktop",
+            DeviceType:  "desktop",
+            Fingerprint: "test-fingerprint",
+            Download:    true,
+        }
+    
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(info)
     })
 
     // self signed certificate
