@@ -3,9 +3,15 @@ package main
 import (
     "context"
     "crypto/rand"
+    "crypto/rsa"
+    "crypto/tls"
+    "crypto/x509"
+    "crypto/x509/pkix"
     "encoding/json"
+    "encoding/pem"
     "fmt"
     "log"
+    "math/big"
     "net"
     "net/http"
     "os"
@@ -13,6 +19,7 @@ import (
     "io"
     "bytes"
     "mime/multipart"
+    "time"
 
     "github.com/google/uuid"
     "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -152,6 +159,37 @@ func (a *App) GetCurrentPIN() string {
     return a.activePIN
 }
 
+func generateCert() ([]byte, []byte, error) {
+    priv, err := rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    template := x509.Certificate{
+        SerialNumber: big.NewInt(1),
+        Subject: pkix.Name{
+            Organization: []string{"LocalSend"},
+        },
+        NotBefore: time.Now(),
+        NotAfter:  time.Now().Add(365 * 24 * time.Hour),
+        
+        KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+        ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+        BasicConstraintsValid: true,
+        IPAddresses:          []net.IP{net.ParseIP("127.0.0.1")},
+    }
+
+    derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+    keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+
+    return certPEM, keyPEM, nil
+}
+
 func (a *App) StartServer(port int) error {
     mux := http.NewServeMux()
 
@@ -243,19 +281,37 @@ func (a *App) StartServer(port int) error {
         w.WriteHeader(http.StatusOK)
     })
 
+    // self signed certificate
+    certPEM, keyPEM, err := generateCert()
+    if err != nil {
+        return fmt.Errorf("failed to generate certificate: %v", err)
+    }
+
+    cert, err := tls.X509KeyPair(certPEM, keyPEM)
+    if err != nil {
+        return fmt.Errorf("failed to load certificate: %v", err)
+    }
+
+    tlsConfig := &tls.Config{
+        Certificates: []tls.Certificate{cert},
+        MinVersion:  tls.VersionTLS12,
+        MaxVersion:  tls.VersionTLS13,
+    }
+
     a.server = &http.Server{
         Addr:    fmt.Sprintf(":%d", port),
         Handler: mux,
+        TLSConfig: tlsConfig,
     }
 
     go func() {
-        if err := a.server.ListenAndServe(); err != http.ErrServerClosed {
-            log.Printf("HTTP server error: %v\n", err)
-            runtime.LogError(a.ctx, fmt.Sprintf("HTTP server error: %v", err))
+        if err := a.server.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
+            log.Printf("HTTPS server error: %v\n", err)
+            runtime.LogError(a.ctx, fmt.Sprintf("HTTPS server error: %v", err))
         }
     }()
 
-    runtime.LogInfo(a.ctx, fmt.Sprintf("LocalSend HTTP server started on port %d", port))
+    runtime.LogInfo(a.ctx, fmt.Sprintf("LocalSend HTTPS server started on port %d", port))
     return nil
 }
 
@@ -271,7 +327,14 @@ func (a *App) Shutdown(ctx context.Context) {
 // client side methods
 
 func (a *App) RegisterWithDevice(ip string, port int) error {
-    client := &http.Client{}
+    client := &http.Client{
+        Transport: &http.Transport{
+            TLSClientConfig: &tls.Config{
+                InsecureSkipVerify: true,
+            },
+        },
+    }
+
     regRequest := struct {
         Alias       string `json:"alias"`
         Version     string `json:"version"`
@@ -298,7 +361,7 @@ func (a *App) RegisterWithDevice(ip string, port int) error {
     }
     runtime.LogInfo(a.ctx, fmt.Sprintf("Sending registration request to %s:%d", ip, port))
     resp, err := client.Post(
-        fmt.Sprintf("http://%s:%d/api/localsend/v2/register", ip, port),
+        fmt.Sprintf("https://%s:%d/api/localsend/v2/register", ip, port),
         "application/json",
         bytes.NewBuffer(payload),
     )
@@ -311,10 +374,16 @@ func (a *App) RegisterWithDevice(ip string, port int) error {
 }
 
 func (a *App) SendTestFile(ip string, port int, pin string) error {
-    client := &http.Client{}
+    client := &http.Client{
+        Transport: &http.Transport{
+            TLSClientConfig: &tls.Config{
+                InsecureSkipVerify: true, // For self-signed cert
+            },
+        },
+    }
     
     // Step 1: Prepare upload
-    prepareURL := fmt.Sprintf("http://%s:%d/api/localsend/v2/prepare-upload?pin=%s", ip, port, pin)
+    prepareURL := fmt.Sprintf("https://%s:%d/api/localsend/v2/prepare-upload?pin=%s", ip, port, pin)
     runtime.LogInfo(a.ctx, fmt.Sprintf("Preparing upload with URL: %s", prepareURL))
     
     resp, err := client.Post(prepareURL, "application/json", nil)
@@ -357,7 +426,7 @@ func (a *App) SendTestFile(ip string, port int, pin string) error {
     writer.Close()
 
     uploadURL := fmt.Sprintf(
-        "http://%s:%d/api/localsend/v2/upload?fileId=%s&token=%s&sessionId=%s",
+        "https://%s:%d/api/localsend/v2/upload?fileId=%s&token=%s&sessionId=%s",
         ip, port, fileId, token, prepareResp.SessionId,
     )
     runtime.LogInfo(a.ctx, fmt.Sprintf("Uploading file with URL: %s", uploadURL))
